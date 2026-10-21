@@ -110,6 +110,21 @@
                 </form>
             </div>
 
+            <!-- Attendee List Import (so scans of ID-only QR codes show name/email) -->
+            <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl">
+                <h2 class="text-base font-semibold text-white mb-1 flex items-center gap-2">
+                    <i data-lucide="users" class="w-5 h-5 text-amber-400"></i>
+                    Attendee List
+                </h2>
+                <p class="text-xs text-slate-400 mb-3">If your QR codes only hold an ID or a link with a token, this list lets the app show names and emails instantly, even offline. Export your Google Sheet as CSV (File &gt; Download &gt; CSV) and import it here.</p>
+                <input type="file" id="attendeeCsvInput" accept=".csv,text/csv,text/plain" class="hidden">
+                <div class="flex gap-2">
+                    <button id="importListBtn" class="flex-1 text-sm bg-amber-600 hover:bg-amber-500 px-3 py-2.5 rounded-lg text-white font-medium transition">Import CSV</button>
+                    <button id="clearListBtn" class="text-sm bg-slate-700 hover:bg-slate-600 px-3 py-2.5 rounded-lg text-slate-200 transition">Clear</button>
+                </div>
+                <p id="attendeeListStatus" class="text-xs text-slate-400 mt-2">No list imported</p>
+            </div>
+
             <!-- Last Scanned Attendee Badge Alert -->
             <div id="statusAlert" class="hidden transition-all duration-300"></div>
 
@@ -299,6 +314,7 @@ function doPost(e) {
         // State Management
         let checkedInAttendees = JSON.parse(localStorage.getItem('event_checked_in') || '[]');
         let webhookUrl = localStorage.getItem('event_webhook_url') || '';
+        let attendeeList = JSON.parse(localStorage.getItem('event_attendee_list') || '[]');
         let html5QrCode = null;
         let isCameraActive = false;
 
@@ -479,9 +495,63 @@ function doPost(e) {
         });
 
         // Core Check-In Logic
-        function processCheckIn(rawData) {
+        const pendingLookups = new Set();
+
+        // Ask the Google Apps Script web app for the attendee's name/email (needs the doGet lookup snippet)
+        async function liveLookup(url) {
+            const u = new URL(url);
+            u.searchParams.set('format', 'json');
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 8000);
+            try {
+                const res = await fetch(u.toString(), { redirect: 'follow', signal: ctrl.signal });
+                const data = await res.json();
+                if (data && data.success) return { name: data.name || '', email: data.email || '' };
+            } catch (err) {
+                console.error('Live lookup failed:', err);
+            } finally {
+                clearTimeout(timer);
+            }
+            return null;
+        }
+
+        async function processCheckIn(rawData) {
             let parsed = parseAttendeeData(rawData);
+            const lockKey = parsed.id;
+            if (pendingLookups.has(lockKey)) return;
+            pendingLookups.add(lockKey);
+            try {
+                await processCheckInInner(rawData, parsed);
+            } finally {
+                pendingLookups.delete(lockKey);
+            }
+        }
+
+        async function processCheckInInner(rawData, parsed) {
+
+            // Fill in name/email from the imported attendee list when the QR only holds an ID
+            let listMatch = null;
+            if (!parsed.name || !parsed.email) {
+                listMatch = lookupAttendee(parsed.id) || lookupAttendee(String(rawData).trim());
+                if (listMatch) {
+                    parsed.name = parsed.name || listMatch.name || null;
+                    parsed.email = parsed.email || listMatch.email || null;
+                }
+            }
             
+            // Still no details and the QR is a URL: ask the Google Sheet script directly
+            let liveTried = false;
+            if (!parsed.name && !parsed.email && parsed.url &&
+                !checkedInAttendees.some(item => item.id === parsed.id)) {
+                liveTried = true;
+                const live = await liveLookup(parsed.url);
+                if (live) {
+                    listMatch = live;
+                    parsed.name = live.name || null;
+                    parsed.email = live.email || null;
+                }
+            }
+
             // Check if already checked in locally
             const existingIndex = checkedInAttendees.findIndex(item => item.id === parsed.id);
 
@@ -504,7 +574,11 @@ function doPost(e) {
             saveLocalData();
             playSuccessSound();
 
-            showAlert('Check-In Successful!', `${newRecord.name !== 'N/A' ? newRecord.name : newRecord.id} is marked PRESENT.`, 'success');
+            if (!listMatch && newRecord.name === 'N/A' && (attendeeList.length || liveTried)) {
+                showAlert('Details Not Found', `Token "${newRecord.id}" was checked in, but no name/email was found (not in the imported list${liveTried ? ' and the sheet lookup returned nothing' : ''}).`, 'warning');
+            } else {
+                showAlert('Check-In Successful!', `${newRecord.name !== 'N/A' ? newRecord.name : newRecord.id} is marked PRESENT.`, 'success');
+            }
 
             // Sync with Google Sheet
             if (webhookUrl) {
@@ -516,7 +590,29 @@ function doPost(e) {
         }
 
         // Parse QR Raw Content (Handles plain ID strings or JSON payloads)
+        // Pull the token out of a QR URL (e.g. https://script.google.com/macros/s/XXX/exec?token=abc123)
+        function extractToken(urlStr) {
+            try {
+                const u = new URL(urlStr);
+                const p = u.searchParams;
+                for (const k of ['token', 't', 'id', 'qr', 'code', 'ticket', 'ticketId']) {
+                    if (p.get(k)) return p.get(k).trim();
+                }
+                for (const [k, v] of p.entries()) {
+                    if (k !== 'format' && v) return v.trim();
+                }
+                if (u.hash && u.hash.length > 1) return u.hash.slice(1).trim();
+                const last = u.pathname.split('/').filter(Boolean).pop();
+                if (last && last !== 'exec' && last !== 'dev') return last;
+            } catch (e) {}
+            return String(urlStr).trim();
+        }
+
         function parseAttendeeData(rawData) {
+            const trimmed = String(rawData).trim();
+            if (/^https?:\/\//i.test(trimmed)) {
+                return { id: extractToken(trimmed), name: null, email: null, url: trimmed };
+            }
             try {
                 const parsed = JSON.parse(rawData);
                 return {
@@ -693,6 +789,90 @@ function doPost(e) {
             link.click();
             document.body.removeChild(link);
         });
+
+        // ---- Attendee list import / lookup ----
+        function parseCSV(text) {
+            const rows = []; let row = [], field = '', inQuotes = false;
+            text = text.replace(/^\uFEFF/, '');
+            for (let i = 0; i < text.length; i++) {
+                const c = text[i];
+                if (inQuotes) {
+                    if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+                    else if (c === '"') inQuotes = false;
+                    else field += c;
+                } else if (c === '"') inQuotes = true;
+                else if (c === ',') { row.push(field); field = ''; }
+                else if (c === '\n' || c === '\r') {
+                    if (c === '\r' && text[i + 1] === '\n') i++;
+                    row.push(field); field = '';
+                    if (row.some(v => v.trim() !== '')) rows.push(row);
+                    row = [];
+                } else field += c;
+            }
+            row.push(field);
+            if (row.some(v => v.trim() !== '')) rows.push(row);
+            return rows;
+        }
+
+        function importAttendeeCSV(text) {
+            const rows = parseCSV(text);
+            if (rows.length < 2) return 0;
+            const header = rows[0].map(h => h.trim().toLowerCase());
+            const find = re => header.findIndex(h => re.test(h));
+            let idCol = find(/^(id|ticket.?id|ticket|code|token|qr.*|attendee.?id|reg.*id|registration.*)$|\bid\b|token/);
+            let nameCol = find(/name/);
+            let emailCol = find(/e-?mail|mail/);
+            if (idCol === -1) idCol = 0;
+            if (nameCol === -1) nameCol = idCol === 0 ? 1 : 0;
+            if (emailCol === -1) emailCol = header.length > 2 ? 2 : -1;
+            const list = [];
+            for (let i = 1; i < rows.length; i++) {
+                const r = rows[i];
+                const id = (r[idCol] || '').trim();
+                if (!id) continue;
+                list.push({
+                    id,
+                    name: (r[nameCol] || '').trim(),
+                    email: emailCol >= 0 ? (r[emailCol] || '').trim() : '',
+                    keys: r.map(c => c.trim().toLowerCase()).filter(Boolean)
+                });
+            }
+            attendeeList = list;
+            localStorage.setItem('event_attendee_list', JSON.stringify(list));
+            return list.length;
+        }
+
+        function lookupAttendee(value) {
+            const v = String(value || '').trim().toLowerCase();
+            if (!v) return null;
+            return attendeeList.find(a => a.id.toLowerCase() === v || (a.email && a.email.toLowerCase() === v) || (a.keys && a.keys.includes(v))) || null;
+        }
+
+        function updateAttendeeListStatus() {
+            document.getElementById('attendeeListStatus').textContent =
+                attendeeList.length ? `${attendeeList.length} attendees loaded` : 'No list imported';
+        }
+
+        document.getElementById('importListBtn').addEventListener('click', () => document.getElementById('attendeeCsvInput').click());
+        document.getElementById('attendeeCsvInput').addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                const n = importAttendeeCSV(String(reader.result));
+                updateAttendeeListStatus();
+                if (n) showAlert('List Imported', `${n} attendees loaded. Scans will now show name and email.`, 'success');
+                else showAlert('Import Failed', 'Could not read any attendees. Make sure the file is a CSV with a header row.', 'error');
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        });
+        document.getElementById('clearListBtn').addEventListener('click', () => {
+            attendeeList = [];
+            localStorage.removeItem('event_attendee_list');
+            updateAttendeeListStatus();
+        });
+        updateAttendeeListStatus();
 
         // Helper Utility
         function escapeHtml(str) {
