@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Event QR Registration & Check-in</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- HTML5 QR Code Scanner Library -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        #reader video { object-fit: cover !important; border-radius: 0.75rem; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col">
+
+    <!-- Header Navigation -->
+    <header class="bg-slate-800/80 backdrop-blur border-b border-slate-700 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <div class="p-2 bg-indigo-600 rounded-lg">
+                    <i data-lucide="qr-code" class="w-6 h-6 text-white"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold text-white leading-tight">UniCheck-in Express</h1>
+                    <p class="text-xs text-slate-400">Event Registration Scanner</p>
+                </div>
+            </div>
+            
+            <div class="flex items-center space-x-3">
+                <!-- Sync Status Badge -->
+                <div id="syncStatusBadge" class="hidden sm:flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    <span class="w-2 h-2 rounded-full bg-amber-400 mr-2 animate-pulse"></span>
+                    Local Mode (Not Synced)
+                </div>
+                
+                <button id="openSetupBtn" class="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm px-3 py-2 rounded-lg transition font-medium">
+                    <i data-lucide="sheet" class="w-4 h-4"></i>
+                    <span>Connect Google Sheet</span>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+        <!-- Left Column: Scanner & Manual Entry (5 cols) -->
+        <section class="lg:col-span-5 space-y-6">
+            
+            <!-- Camera QR Scanner Card -->
+            <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-base font-semibold text-white flex items-center gap-2">
+                        <i data-lucide="camera" class="w-5 h-5 text-indigo-400"></i>
+                        QR Code Scanner
+                    </h2>
+                    <button id="toggleCameraBtn" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-md text-slate-200 transition flex items-center gap-1">
+                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                        <span>Start Camera</span>
+                    </button>
+                </div>
+
+                <!-- HTTPS warning (shown only if camera cannot work on this origin) -->
+                <div id="httpsWarning" class="hidden mb-3 text-xs bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-lg p-3">
+                    This page is not served over HTTPS, so the browser will block live camera access. Use "Scan from Photo" below, or open the HTTPS link.
+                </div>
+
+                <!-- Scanner Container -->
+                <div class="relative bg-slate-900 border-2 border-dashed border-slate-700 rounded-xl overflow-hidden min-h-[260px] flex flex-col items-center justify-center p-2">
+                    <div id="reader" class="w-full"></div>
+                    <div id="scannerPlaceholder" class="text-center p-6">
+                        <i data-lucide="camera-off" class="w-12 h-12 text-slate-600 mx-auto mb-2"></i>
+                        <p class="text-slate-400 text-sm font-medium">Camera is currently off</p>
+                        <p class="text-slate-500 text-xs mt-1">Click "Start Camera" above to begin scanning</p>
+                    </div>
+                </div>
+
+                <!-- Fallback: scan from a photo taken with the native camera app -->
+                <input type="file" id="qrFileInput" accept="image/*" capture="environment" class="hidden">
+                <button id="scanPhotoBtn" class="mt-3 w-full text-sm bg-indigo-600 hover:bg-indigo-500 px-3 py-2.5 rounded-lg text-white font-medium transition flex items-center justify-center gap-2">
+                    <i data-lucide="image" class="w-4 h-4"></i>
+                    <span>Scan from Photo</span>
+                </button>
+                <div id="fileReader" class="hidden"></div>
+            </div>
+
+            <!-- Manual Entry Fallback -->
+            <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl">
+                <h2 class="text-base font-semibold text-white mb-3 flex items-center gap-2">
+                    <i data-lucide="keyboard" class="w-5 h-5 text-emerald-400"></i>
+                    Manual Input / Barcode Gun
+                </h2>
+                <form id="manualEntryForm" class="flex gap-2">
+                    <input 
+                        type="text" 
+                        id="manualInput" 
+                        placeholder="Scan or type ID / JSON data..." 
+                        class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                        required
+                    />
+                    <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-2.5 rounded-lg text-sm transition flex items-center justify-center">
+                        Check In
+                    </button>
+                </form>
+            </div>
+
+            <!-- Last Scanned Attendee Badge Alert -->
+            <div id="statusAlert" class="hidden transition-all duration-300"></div>
+
+        </section>
+
+        <!-- Right Column: Live Table & Stats (7 cols) -->
+        <section class="lg:col-span-7 space-y-6">
+
+            <!-- Stats Bar -->
+            <div class="grid grid-cols-3 gap-4">
+                <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                    <p class="text-xs font-medium text-slate-400">Total Checked In</p>
+                    <p id="statTotalCheckedIn" class="text-2xl font-bold text-indigo-400 mt-1">0</p>
+                </div>
+                <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                    <p class="text-xs font-medium text-slate-400">Sync Queue</p>
+                    <p id="statPendingSync" class="text-2xl font-bold text-amber-400 mt-1">0</p>
+                </div>
+                <div class="bg-slate-800 border border-slate-700 rounded-xl p-4">
+                    <p class="text-xs font-medium text-slate-400">Last Active</p>
+                    <p id="statLastTime" class="text-lg font-semibold text-slate-300 mt-1.5">--:--</p>
+                </div>
+            </div>
+
+            <!-- Attendee Table Section -->
+            <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 shadow-xl flex flex-col h-[520px]">
+                
+                <!-- Search and Controls -->
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+                    <h2 class="text-base font-semibold text-white flex items-center gap-2">
+                        <i data-lucide="users" class="w-5 h-5 text-indigo-400"></i>
+                        Checked-In Attendees
+                    </h2>
+                    
+                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                        <div class="relative flex-1 sm:w-64">
+                            <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                            <input 
+                                type="text" 
+                                id="searchInput" 
+                                placeholder="Search by name, ID..." 
+                                class="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                            />
+                        </div>
+                        <button id="exportCsvBtn" title="Export CSV" class="p-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition">
+                            <i data-lucide="download" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Table Content -->
+                <div class="flex-1 overflow-y-auto border border-slate-700/60 rounded-xl bg-slate-900/50">
+                    <table class="w-full text-left text-xs">
+                        <thead class="bg-slate-800 text-slate-400 sticky top-0 uppercase tracking-wider font-semibold border-b border-slate-700">
+                            <tr>
+                                <th class="px-4 py-3">Attendee ID / QR Data</th>
+                                <th class="px-4 py-3">Name</th>
+                                <th class="px-4 py-3">Time</th>
+                                <th class="px-4 py-3 text-center">Sheet Sync</th>
+                            </tr>
+                        </thead>
+                        <tbody id="attendeeTableBody" class="divide-y divide-slate-800 text-slate-300">
+                            <!-- Dynamic Content -->
+                        </tbody>
+                    </table>
+                    
+                    <!-- Empty State -->
+                    <div id="emptyTableState" class="text-center py-16">
+                        <i data-lucide="user-check" class="w-12 h-12 text-slate-600 mx-auto mb-2"></i>
+                        <p class="text-slate-400 font-medium">No attendees checked in yet</p>
+                        <p class="text-slate-500 text-xs mt-1">Scan QR codes to fill this record</p>
+                    </div>
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Modal: Google Sheet Integration & Apps Script Setup -->
+    <div id="setupModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            
+            <!-- Modal Header -->
+            <div class="p-5 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <div class="flex items-center space-x-2">
+                    <i data-lucide="file-spreadsheet" class="w-5 h-5 text-emerald-400"></i>
+                    <h3 class="text-lg font-bold text-white">Google Sheet Connection Setup</h3>
+                </div>
+                <button id="closeSetupBtn" class="text-slate-400 hover:text-white p-1 rounded-lg">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+
+            <!-- Modal Body -->
+            <div class="p-6 overflow-y-auto space-y-5 text-xs text-slate-300">
+                
+                <!-- Webhook URL Field -->
+                <div>
+                    <label class="block font-semibold text-slate-200 mb-1">1. Webhook URL (Apps Script Web App)</label>
+                    <input 
+                        type="url" 
+                        id="webhookUrlInput" 
+                        placeholder="https://script.google.com/macros/s/.../exec" 
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                    />
+                    <p class="text-[11px] text-slate-400 mt-1">Paste your deployed Google Apps Script Web App URL here.</p>
+                </div>
+
+                <!-- Setup Instructions -->
+                <div class="space-y-3 bg-slate-900/60 p-4 rounded-xl border border-slate-700/60">
+                    <h4 class="font-bold text-indigo-400 uppercase tracking-wider text-[11px]">2. Apps Script Backend Instructions</h4>
+                    <ol class="list-decimal list-inside space-y-1.5 leading-relaxed text-slate-300">
+                        <li>Open your Google Sheet containing registered attendees.</li>
+                        <li>Ensure column headers exist (e.g. <span class="font-mono text-emerald-400">ID / Ticket Code</span> and <span class="font-mono text-emerald-400">Status</span>).</li>
+                        <li>Go to <b>Extensions &gt; Apps Script</b> in the top menu.</li>
+                        <li>Replace all code in <span class="font-mono text-amber-400">Code.gs</span> with the snippet below.</li>
+                        <li>Click <b>Deploy &gt; New Deployment</b>.</li>
+                        <li>Select type <b>Web app</b>, set <i>Execute as</i> to <b>Me</b>, and <i>Who has access</i> to <b>Anyone</b>.</li>
+                        <li>Click <b>Deploy</b>, copy the Web App URL, and paste it into the field above!</li>
+                    </ol>
+                </div>
+
+                <!-- Apps Script Snippet -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="font-semibold text-slate-200">Google Apps Script Snippet (Code.gs)</span>
+                        <button id="copyScriptBtn" class="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1">
+                            <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                            <span>Copy Code</span>
+                        </button>
+                    </div>
+                    <pre class="bg-slate-950 border border-slate-800 rounded-lg p-3 overflow-x-auto text-[11px] font-mono text-emerald-400 leading-tight select-all">
+function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+    var targetId = String(data.id || data.ticketId || data.data).trim();
+    
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var rows = sheet.getDataRange().getValues();
+    
+    // Find matching attendee by ID (Searches first column or any matching cell)
+    var updated = false;
+    for (var i = 1; i < rows.length; i++) {
+      var rowId = String(rows[i][0]).trim(); // Assumes ID is Column A
+      
+      if (rowId === targetId || String(rows[i][1]).trim() === targetId) {
+        // Change Status to 'Present' (Assumes Status is Column C / Index 3, adjust index as needed)
+        // You can adjust sheet.getRange(row, col) to match your sheet column layout
+        sheet.getRange(i + 1, 3).setValue("Present"); 
+        sheet.getRange(i + 1, 4).setValue(new Date().toLocaleString()); // Optional check-in timestamp
+        updated = true;
+        break;
+      }
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({ 
+      success: updated, 
+      message: updated ? "Status updated to Present" : "Attendee ID not found in sheet" 
+    })).setMimeType(ContentService.MimeType.JSON);
+    
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ 
+      success: false, 
+      error: err.toString() 
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}</pre>
+                </div>
+
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="p-4 border-t border-slate-700 bg-slate-800/80 flex justify-end">
+                <button id="saveWebhookBtn" class="bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-5 py-2 rounded-lg text-xs transition flex items-center gap-2">
+                    <i data-lucide="save" class="w-4 h-4"></i>
+                    <span>Save & Enable Sync</span>
+                </button>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Application JavaScript -->
+    <script>
+        // State Management
+        let checkedInAttendees = JSON.parse(localStorage.getItem('event_checked_in') || '[]');
+        let webhookUrl = localStorage.getItem('event_webhook_url') || '';
+        let html5QrCode = null;
+        let isCameraActive = false;
+
+        // Web Audio API for Confirmation Sounds
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playBeep(frequency = 880, type = 'sine', duration = 0.15) {
+            try {
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + duration);
+            } catch (e) {
+                console.warn('Audio play failed', e);
+            }
+        }
+
+        function playSuccessSound() {
+            playBeep(880, 'sine', 0.1);
+            setTimeout(() => playBeep(1200, 'sine', 0.15), 100);
+        }
+
+        function playDuplicateSound() {
+            playBeep(400, 'triangle', 0.2);
+            setTimeout(() => playBeep(300, 'triangle', 0.25), 150);
+        }
+
+        // DOM Elements
+        const toggleCameraBtn = document.getElementById('toggleCameraBtn');
+        const scannerPlaceholder = document.getElementById('scannerPlaceholder');
+        const manualEntryForm = document.getElementById('manualEntryForm');
+        const manualInput = document.getElementById('manualInput');
+        const statusAlert = document.getElementById('statusAlert');
+        const attendeeTableBody = document.getElementById('attendeeTableBody');
+        const emptyTableState = document.getElementById('emptyTableState');
+        const searchInput = document.getElementById('searchInput');
+        const exportCsvBtn = document.getElementById('exportCsvBtn');
+        
+        const statTotalCheckedIn = document.getElementById('statTotalCheckedIn');
+        const statPendingSync = document.getElementById('statPendingSync');
+        const statLastTime = document.getElementById('statLastTime');
+        const syncStatusBadge = document.getElementById('syncStatusBadge');
+
+        const openSetupBtn = document.getElementById('openSetupBtn');
+        const closeSetupBtn = document.getElementById('closeSetupBtn');
+        const setupModal = document.getElementById('setupModal');
+        const webhookUrlInput = document.getElementById('webhookUrlInput');
+        const saveWebhookBtn = document.getElementById('saveWebhookBtn');
+        const copyScriptBtn = document.getElementById('copyScriptBtn');
+
+        // Initialize UI
+        window.addEventListener('DOMContentLoaded', () => {
+            lucide.createIcons();
+            webhookUrlInput.value = webhookUrl;
+            updateSyncBadgeState();
+            renderTable();
+            updateStats();
+        });
+
+        // Toggle Camera Scanning
+        toggleCameraBtn.addEventListener('click', () => {
+            if (isCameraActive) {
+                stopScanner();
+            } else {
+                startScanner();
+            }
+        });
+
+        function describeCameraError(err) {
+            const name = (err && err.name) || '';
+            const msg = String((err && err.message) || err || '');
+            if (!window.isSecureContext) return 'Camera needs HTTPS. Open the secure (https://) link, or use "Scan from Photo".';
+            if (name === 'NotAllowedError' || /permission|denied/i.test(msg)) return 'Camera blocked for this site. Tap the lock icon in the address bar > Permissions > Camera > Allow, then reload. If you are inside another app (WhatsApp, Instagram...), open the link in Chrome/Safari.';
+            if (name === 'NotFoundError' || /no camera|not found/i.test(msg)) return 'No camera was found on this device.';
+            if (name === 'NotReadableError' || /could not start|in use/i.test(msg)) return 'Camera is in use by another app or tab. Close it and try again.';
+            return 'Camera failed: ' + (name || msg);
+        }
+
+        async function startScanner() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showAlert('Error', describeCameraError(null), 'error');
+                return;
+            }
+            html5QrCode = new Html5Qrcode("reader");
+            const config = { fps: 10, qrbox: { width: 220, height: 220 } };
+            scannerPlaceholder.classList.add('hidden');
+
+            const attempts = [{ facingMode: "environment" }, { facingMode: "user" }];
+            let lastErr = null;
+            for (const cam of attempts) {
+                try {
+                    await html5QrCode.start(cam, config, onScanSuccess, onScanFailure);
+                    isCameraActive = true;
+                    toggleCameraBtn.querySelector('span').textContent = "Stop Camera";
+                    toggleCameraBtn.classList.replace('bg-slate-700', 'bg-rose-600');
+                    return;
+                } catch (err) {
+                    lastErr = err;
+                    console.error("Camera access error:", err);
+                    // Permission problems won't be fixed by trying another camera
+                    if (err && (err.name === 'NotAllowedError' || /permission|denied/i.test(String(err.message || err)))) break;
+                }
+            }
+            scannerPlaceholder.classList.remove('hidden');
+            showAlert('Error', describeCameraError(lastErr), 'error');
+        }
+
+        // Scan from photo fallback (works without live camera permission / HTTPS)
+        const scanPhotoBtn = document.getElementById('scanPhotoBtn');
+        const qrFileInput = document.getElementById('qrFileInput');
+        scanPhotoBtn.addEventListener('click', () => qrFileInput.click());
+        qrFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const fileScanner = new Html5Qrcode("fileReader");
+            try {
+                const text = await fileScanner.scanFile(file, false);
+                onScanSuccess(text);
+            } catch (err) {
+                showAlert('Error', 'No QR code found in that photo. Hold steady, fill the frame, and try again.', 'error');
+            } finally {
+                try { fileScanner.clear(); } catch (_) {}
+                qrFileInput.value = '';
+            }
+        });
+
+        if (!window.isSecureContext) {
+            document.getElementById('httpsWarning').classList.remove('hidden');
+        }
+
+        function stopScanner() {
+            if (html5QrCode && isCameraActive) {
+                html5QrCode.stop().then(() => {
+                    html5QrCode.clear();
+                    isCameraActive = false;
+                    scannerPlaceholder.classList.remove('hidden');
+                    toggleCameraBtn.querySelector('span').textContent = "Start Camera";
+                    toggleCameraBtn.classList.replace('bg-rose-600', 'bg-slate-700');
+                });
+            }
+        }
+
+        // QR Scan Handler
+        let lastScannedData = null;
+        let lastScanTime = 0;
+
+        function onScanSuccess(decodedText) {
+            const now = Date.now();
+            // Prevent accidental double rapid triggering
+            if (decodedText === lastScannedData && now - lastScanTime < 2500) {
+                return;
+            }
+            lastScannedData = decodedText;
+            lastScanTime = now;
+
+            processCheckIn(decodedText);
+        }
+
+        function onScanFailure(error) {
+            // Quiet fail for scan search frames
+        }
+
+        // Manual Entry Handler
+        manualEntryForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const value = manualInput.value.trim();
+            if (value) {
+                processCheckIn(value);
+                manualInput.value = '';
+            }
+        });
+
+        // Core Check-In Logic
+        function processCheckIn(rawData) {
+            let parsed = parseAttendeeData(rawData);
+            
+            // Check if already checked in locally
+            const existingIndex = checkedInAttendees.findIndex(item => item.id === parsed.id);
+
+            if (existingIndex !== -1) {
+                playDuplicateSound();
+                showAlert('Already Checked In!', `${parsed.name || parsed.id} was already scanned.`, 'warning');
+                return;
+            }
+
+            // Record Check-in
+            const newRecord = {
+                id: parsed.id,
+                name: parsed.name || 'N/A',
+                email: parsed.email || 'N/A',
+                timestamp: new Date().toLocaleTimeString(),
+                synced: false
+            };
+
+            checkedInAttendees.unshift(newRecord);
+            saveLocalData();
+            playSuccessSound();
+
+            showAlert('Check-In Successful!', `${newRecord.name !== 'N/A' ? newRecord.name : newRecord.id} is marked PRESENT.`, 'success');
+
+            // Sync with Google Sheet
+            if (webhookUrl) {
+                syncRecordToGoogleSheet(newRecord);
+            }
+
+            renderTable();
+            updateStats();
+        }
+
+        // Parse QR Raw Content (Handles plain ID strings or JSON payloads)
+        function parseAttendeeData(rawData) {
+            try {
+                const parsed = JSON.parse(rawData);
+                return {
+                    id: String(parsed.id || parsed.ticketId || parsed.code || rawData).trim(),
+                    name: parsed.name || parsed.fullName || null,
+                    email: parsed.email || null
+                };
+            } catch (e) {
+                // If simple string ID
+                return {
+                    id: String(rawData).trim(),
+                    name: null,
+                    email: null
+                };
+            }
+        }
+
+        // Send to Google Apps Script Webhook
+        function syncRecordToGoogleSheet(record) {
+            fetch(webhookUrl, {
+                method: 'POST',
+                mode: 'no-cors', // Standard cross-origin POST for Google Apps Script Web Apps
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(record)
+            }).then(() => {
+                record.synced = true;
+                saveLocalData();
+                renderTable();
+                updateStats();
+            }).catch(err => {
+                console.error("Sync error:", err);
+            });
+        }
+
+        // UI Alert Badge Banner
+        function showAlert(title, message, type) {
+            let bgClass, borderClass, textClass, iconName;
+
+            if (type === 'success') {
+                bgClass = 'bg-emerald-500/10';
+                borderClass = 'border-emerald-500/30';
+                textClass = 'text-emerald-400';
+                iconName = 'check-circle-2';
+            } else if (type === 'warning') {
+                bgClass = 'bg-amber-500/10';
+                borderClass = 'border-amber-500/30';
+                textClass = 'text-amber-400';
+                iconName = 'alert-triangle';
+            } else {
+                bgClass = 'bg-rose-500/10';
+                borderClass = 'border-rose-500/30';
+                textClass = 'text-rose-400';
+                iconName = 'x-circle';
+            }
+
+            statusAlert.className = `p-4 rounded-xl border ${bgClass} ${borderClass} flex items-start gap-3 shadow-lg`;
+            statusAlert.innerHTML = `
+                <i data-lucide="${iconName}" class="w-6 h-6 ${textClass} shrink-0 mt-0.5"></i>
+                <div>
+                    <h4 class="font-bold text-sm ${textClass}">${title}</h4>
+                    <p class="text-xs text-slate-300 mt-0.5">${message}</p>
+                </div>
+            `;
+            statusAlert.classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        // Render Local Attendee Table
+        function renderTable(filterQuery = '') {
+            const query = filterQuery.toLowerCase();
+            const filtered = checkedInAttendees.filter(item => 
+                item.id.toLowerCase().includes(query) || 
+                item.name.toLowerCase().includes(query) ||
+                item.email.toLowerCase().includes(query)
+            );
+
+            if (filtered.length === 0) {
+                emptyTableState.classList.remove('hidden');
+                attendeeTableBody.innerHTML = '';
+                return;
+            }
+
+            emptyTableState.classList.add('hidden');
+            attendeeTableBody.innerHTML = filtered.map(item => `
+                <tr class="hover:bg-slate-800/50 transition">
+                    <td class="px-4 py-3 font-mono text-indigo-300 font-medium">${escapeHtml(item.id)}</td>
+                    <td class="px-4 py-3 font-medium text-slate-200">
+                        ${escapeHtml(item.name)}
+                        ${item.email !== 'N/A' ? `<br><span class="text-[10px] text-slate-400">${escapeHtml(item.email)}</span>` : ''}
+                    </td>
+                    <td class="px-4 py-3 text-slate-400 text-[11px]">${item.timestamp}</td>
+                    <td class="px-4 py-3 text-center">
+                        ${item.synced 
+                            ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i data-lucide="check" class="w-3 h-3 mr-1"></i> Synced</span>`
+                            : `<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-slate-700 text-slate-400">Local</span>`
+                        }
+                    </td>
+                </tr>
+            `).join('');
+
+            lucide.createIcons();
+        }
+
+        // Search Listener
+        searchInput.addEventListener('input', (e) => {
+            renderTable(e.target.value);
+        });
+
+        // Data Storage & Stats Update
+        function saveLocalData() {
+            localStorage.setItem('event_checked_in', JSON.stringify(checkedInAttendees));
+        }
+
+        function updateStats() {
+            statTotalCheckedIn.textContent = checkedInAttendees.length;
+            const unsyncedCount = checkedInAttendees.filter(a => !a.synced).length;
+            statPendingSync.textContent = webhookUrl ? unsyncedCount : '--';
+            statLastTime.textContent = checkedInAttendees.length > 0 ? checkedInAttendees[0].timestamp : '--:--';
+        }
+
+        function updateSyncBadgeState() {
+            if (webhookUrl) {
+                syncStatusBadge.className = "flex items-center px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span> Google Sheet Live`;
+            } else {
+                syncStatusBadge.className = "flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
+                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 mr-2"></span> Local Mode (Not Synced)`;
+            }
+        }
+
+        // Modal Controls & Integration Logic
+        openSetupBtn.addEventListener('click', () => setupModal.classList.remove('hidden'));
+        closeSetupBtn.addEventListener('click', () => setupModal.classList.add('hidden'));
+
+        saveWebhookBtn.addEventListener('click', () => {
+            webhookUrl = webhookUrlInput.value.trim();
+            localStorage.setItem('event_webhook_url', webhookUrl);
+            updateSyncBadgeState();
+            updateStats();
+            setupModal.classList.add('hidden');
+        });
+
+        copyScriptBtn.addEventListener('click', () => {
+            const scriptText = document.querySelector('#setupModal pre').innerText;
+            const tempTextArea = document.createElement('textarea');
+            tempTextArea.value = scriptText;
+            document.body.appendChild(tempTextArea);
+            tempTextArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(tempTextArea);
+
+            copyScriptBtn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-400"></i><span class="text-emerald-400">Copied!</span>`;
+            lucide.createIcons();
+            setTimeout(() => {
+                copyScriptBtn.innerHTML = `<i data-lucide="copy" class="w-3.5 h-3.5"></i><span>Copy Code</span>`;
+                lucide.createIcons();
+            }, 2000);
+        });
+
+        // Export to CSV
+        exportCsvBtn.addEventListener('click', () => {
+            if (checkedInAttendees.length === 0) return;
+            
+            let csvContent = "data:text/csv;charset=utf-8,ID,Name,Email,Timestamp,Synced\n";
+            checkedInAttendees.forEach(row => {
+                csvContent += `"${row.id}","${row.name}","${row.email}","${row.timestamp}","${row.synced}"\n`;
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `event_checkins_${new Date().toISOString().slice(0,10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+        // Helper Utility
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+    </script>
+</body>
+</html>
