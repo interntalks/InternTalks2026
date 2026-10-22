@@ -1,17 +1,21 @@
 # Event QR Check-in System
 
-Single-file web app (`index.html`) for event registration and QR check-in.
+Single-file web app (`index.html`) + Google Apps Script backend (`Code.gs`).
+All devices share one live list and one check-in record through your Google Sheet.
 
-## Deploy on GitHub Pages
-1. Create a new repository on GitHub (public).
-2. Upload `index.html` (and this README) to the repository root.
-3. Go to **Settings > Pages**.
-4. Under **Build and deployment**, set Source to **Deploy from a branch**, choose **main** and **/ (root)**, then Save.
-5. After about a minute your site is live at `https://<username>.github.io/<repo-name>/`.
+## 1. Backend (Google Sheet)
+1. Open the attendee sheet. Row 1 must be headers: a token/QR column, name column(s), an email column.
+2. Extensions > Apps Script. Paste `Code.gs` (keep your QR-generation code; read the note at the top about `doGet`).
+3. Deploy > Manage deployments > pencil > New version > Deploy.
+   Execute as **Me**, access **Anyone**. The URL stays the same.
+4. The script adds three columns automatically: `Checked In`, `Check-in Time`, `Checked In By`.
 
-GitHub Pages serves over HTTPS, which is required for live camera scanning.
+## 2. Frontend (GitHub Pages)
+1. Upload `index.html` to the repo root.
+2. Settings > Pages > Deploy from a branch > main > / (root).
 
-## Using the scanner
-- Open the HTTPS link in Chrome or Safari (not inside WhatsApp/Instagram in-app browsers).
-- Tap **Start Camera** and allow camera access.
-- If live scanning is blocked, use **Scan from Photo** as a fallback.
+## 3. Use
+- Open the HTTPS link on each device. Scanning the first QR link (or pasting the Web App URL in Setup) connects it to the sheet.
+- Every device pulls the attendee list and all check-ins every 30 seconds (tap the status badge to sync now).
+- A second scan of the same person on any device shows "Already checked in".
+- Offline scans are saved on the device and pushed to the sheet when the connection returns.

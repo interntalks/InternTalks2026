@@ -116,7 +116,7 @@
                     <i data-lucide="users" class="w-5 h-5 text-amber-400"></i>
                     Attendee List
                 </h2>
-                <p class="text-xs text-slate-400 mb-3">If your QR codes only hold an ID or a link with a token, this list lets the app show names and emails instantly, even offline. Export your Google Sheet as CSV (File &gt; Download &gt; CSV) and import it here.</p>
+                <p class="text-xs text-slate-400 mb-3">Only needed if you are NOT connected to the Google Sheet. When connected, the list loads automatically from the sheet on every device. Export your Google Sheet as CSV (File &gt; Download &gt; CSV) and import it here.</p>
                 <input type="file" id="attendeeCsvInput" accept=".csv,text/csv,text/plain" class="hidden">
                 <div class="flex gap-2">
                     <button id="importListBtn" class="flex-1 text-sm bg-amber-600 hover:bg-amber-500 px-3 py-2.5 rounded-lg text-white font-medium transition">Import CSV</button>
@@ -225,7 +225,7 @@
                 
                 <!-- Webhook URL Field -->
                 <div>
-                    <label class="block font-semibold text-slate-200 mb-1">1. Webhook URL (Apps Script Web App)</label>
+                    <label class="block font-semibold text-slate-200 mb-1">1. Web App URL (Apps Script)</label>
                     <input 
                         type="url" 
                         id="webhookUrlInput" 
@@ -239,61 +239,210 @@
                 <div class="space-y-3 bg-slate-900/60 p-4 rounded-xl border border-slate-700/60">
                     <h4 class="font-bold text-indigo-400 uppercase tracking-wider text-[11px]">2. Apps Script Backend Instructions</h4>
                     <ol class="list-decimal list-inside space-y-1.5 leading-relaxed text-slate-300">
-                        <li>Open your Google Sheet containing registered attendees.</li>
-                        <li>Ensure column headers exist (e.g. <span class="font-mono text-emerald-400">ID / Ticket Code</span> and <span class="font-mono text-emerald-400">Status</span>).</li>
-                        <li>Go to <b>Extensions &gt; Apps Script</b> in the top menu.</li>
-                        <li>Replace all code in <span class="font-mono text-amber-400">Code.gs</span> with the snippet below.</li>
-                        <li>Click <b>Deploy &gt; New Deployment</b>.</li>
-                        <li>Select type <b>Web app</b>, set <i>Execute as</i> to <b>Me</b>, and <i>Who has access</i> to <b>Anyone</b>.</li>
-                        <li>Click <b>Deploy</b>, copy the Web App URL, and paste it into the field above!</li>
+                        <li>Open your Google Sheet with the attendees (row 1 = headers: a token/QR column, a name column, an email column).</li>
+                        <li>Go to <b>Extensions &gt; Apps Script</b> and paste the code below (keep your existing QR-generation code; see the note at the top of the snippet about <span class="font-mono text-amber-400">doGet</span>).</li>
+                        <li>Click <b>Deploy &gt; Manage deployments &gt; pencil &gt; New version &gt; Deploy</b> (or <b>New deployment &gt; Web app</b> the first time).</li>
+                        <li>Set <i>Execute as</i> to <b>Me</b> and <i>Who has access</i> to <b>Anyone</b>.</li>
+                        <li>Paste the Web App URL above and save. Every device that uses the same URL shares one live list.</li>
                     </ol>
                 </div>
 
                 <!-- Apps Script Snippet -->
                 <div>
                     <div class="flex justify-between items-center mb-1">
-                        <span class="font-semibold text-slate-200">Google Apps Script Snippet (Code.gs)</span>
+                        <span class="font-semibold text-slate-200">Apps Script Code (Code.gs)</span>
                         <button id="copyScriptBtn" class="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1">
                             <i data-lucide="copy" class="w-3.5 h-3.5"></i>
                             <span>Copy Code</span>
                         </button>
                     </div>
                     <pre class="bg-slate-950 border border-slate-800 rounded-lg p-3 overflow-x-auto text-[11px] font-mono text-emerald-400 leading-tight select-all">
-function doPost(e) {
+/**
+ * EVENT CHECK-IN BACKEND  (Google Apps Script, bound to your attendee sheet)
+ *
+ * What it does
+ *  - action=list     -&gt; returns every attendee (token, name, email, checkedIn) so all
+ *                       devices load the same list straight from the sheet
+ *  - action=checkin  -&gt; marks one attendee "Present" (with time + device) and tells the
+ *                       app if that person was ALREADY checked in on another device
+ *
+ * Columns are found by header name in row 1 (any order):
+ *   token : header containing "token", "qr", "ticket", "code" or exactly "id"
+ *   name  : header(s) containing "name"      email : header containing "mail"
+ * Three columns are added automatically if missing:
+ *   "Checked In", "Check-in Time", "Checked In By"
+ *
+ * INSTALL
+ *  1. Sheet &gt; Extensions &gt; Apps Script. Paste this whole file (keep your QR-generation code).
+ *  2. If you already have a doGet(e), delete THIS doGet and add these 3 lines at the top of yours:
+ *       var p = (e &amp;&amp; e.parameter) || {};
+ *       if (p.action || p.format === 'json') return json_(handleApi_(p));
+ *  3. Deploy &gt; Manage deployments &gt; pencil &gt; Version: New version &gt; Deploy.
+ *     (Execute as: Me, Who has access: Anyone.  The URL stays the same.)
+ */
+
+var SHEET_NAME = ''; // leave empty to use the first sheet, or put your tab name, e.g. 'Attendees'
+
+function doGet(e) {
+  var p = (e &amp;&amp; e.parameter) || {};
+  if (p.action || p.format === 'json') return json_(handleApi_(p));
+  return ContentService.createTextOutput('Event check-in API is running');
+}
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function handleApi_(p) {
   try {
-    var data = JSON.parse(e.postData.contents);
-    var targetId = String(data.id || data.ticketId || data.data).trim();
-    
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    var rows = sheet.getDataRange().getValues();
-    
-    // Find matching attendee by ID (Searches first column or any matching cell)
-    var updated = false;
-    for (var i = 1; i < rows.length; i++) {
-      var rowId = String(rows[i][0]).trim(); // Assumes ID is Column A
-      
-      if (rowId === targetId || String(rows[i][1]).trim() === targetId) {
-        // Change Status to 'Present' (Assumes Status is Column C / Index 3, adjust index as needed)
-        // You can adjust sheet.getRange(row, col) to match your sheet column layout
-        sheet.getRange(i + 1, 3).setValue("Present"); 
-        sheet.getRange(i + 1, 4).setValue(new Date().toLocaleString()); // Optional check-in timestamp
-        updated = true;
-        break;
-      }
-    }
-    
-    return ContentService.createTextOutput(JSON.stringify({ 
-      success: updated, 
-      message: updated ? "Status updated to Present" : "Attendee ID not found in sheet" 
-    })).setMimeType(ContentService.MimeType.JSON);
-    
+    var action = p.action || 'lookup';
+    if (action === 'list') return apiList_();
+    if (action === 'checkin') return apiCheckin_(p);
+    if (action === 'lookup') return apiLookup_(p);
+    return { success: false, error: 'Unknown action' };
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ 
-      success: false, 
-      error: err.toString() 
-    })).setMimeType(ContentService.MimeType.JSON);
+    return { success: false, error: String(err) };
   }
-}</pre>
+}
+
+function getSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  return SHEET_NAME ? ss.getSheetByName(SHEET_NAME) : ss.getSheets()[0];
+}
+
+function getCols_(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) {
+    return String(h).trim();
+  });
+  var low = header.map(function (h) { return h.toLowerCase(); });
+
+  function findFirst(re) {
+    for (var i = 0; i &lt; low.length; i++) if (re.test(low[i])) return i;
+    return -1;
+  }
+
+  var token = findFirst(/token/);
+  if (token &lt; 0) token = findFirst(/qr/);
+  if (token &lt; 0) token = findFirst(/ticket|^code$/);
+  if (token &lt; 0) token = findFirst(/^id$/);
+  if (token &lt; 0) token = 0;
+
+  var nameCols = [];
+  for (var i = 0; i &lt; low.length; i++) {
+    if (/name/.test(low[i]) &amp;&amp; i !== token) nameCols.push(i);
+  }
+
+  var cols = {
+    token: token,
+    nameCols: nameCols,
+    email: findFirst(/mail/),
+    present: low.indexOf('checked in'),
+    time: low.indexOf('check-in time'),
+    by: low.indexOf('checked in by')
+  };
+
+  var next = header.length;
+  [['present', 'Checked In'], ['time', 'Check-in Time'], ['by', 'Checked In By']].forEach(function (c) {
+    if (cols[c[0]] &lt; 0) {
+      sheet.getRange(1, next + 1).setValue(c[1]);
+      cols[c[0]] = next;
+      next++;
+    }
+  });
+  return cols;
+}
+
+function nameOf_(row, cols) {
+  return cols.nameCols.map(function (i) { return String(row[i] || '').trim(); })
+    .filter(Boolean).join(' ');
+}
+
+function emailOf_(row, cols) {
+  return cols.email &gt;= 0 ? String(row[cols.email] || '').trim() : '';
+}
+
+function toMs_(v) {
+  if (!v) return 0;
+  if (v instanceof Date) return v.getTime();
+  var t = Date.parse(v);
+  return isNaN(t) ? 0 : t;
+}
+
+function findRow_(data, cols, token) {
+  var t = String(token || '').trim();
+  if (!t) return -1;
+  var tl = t.toLowerCase();
+  var i;
+  for (i = 1; i &lt; data.length; i++) if (String(data[i][cols.token]).trim() === t) return i;
+  for (i = 1; i &lt; data.length; i++) if (String(data[i][cols.token]).trim().toLowerCase() === tl) return i;
+  for (i = 1; i &lt; data.length; i++) {
+    for (var c = 0; c &lt; data[i].length; c++) {
+      if (String(data[i][c]).trim().toLowerCase() === tl) return i;
+    }
+  }
+  return -1;
+}
+
+function apiList_() {
+  var sheet = getSheet_();
+  var cols = getCols_(sheet);
+  var data = sheet.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i &lt; data.length; i++) {
+    var r = data[i];
+    var tok = String(r[cols.token] || '').trim();
+    if (!tok) continue;
+    out.push({
+      token: tok,
+      name: nameOf_(r, cols),
+      email: emailOf_(r, cols),
+      checkedIn: String(r[cols.present] || '').trim() !== '',
+      ts: toMs_(r[cols.time])
+    });
+  }
+  return { success: true, attendees: out, total: out.length };
+}
+
+function apiLookup_(p) {
+  var sheet = getSheet_();
+  var cols = getCols_(sheet);
+  var data = sheet.getDataRange().getValues();
+  var token = String(p.token || p.t || p.id || p.qr || p.code || p.ticket || '').trim();
+  var row = findRow_(data, cols, token);
+  if (row &lt; 0) return { success: false };
+  return { success: true, name: nameOf_(data[row], cols), email: emailOf_(data[row], cols) };
+}
+
+function apiCheckin_(p) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sheet = getSheet_();
+    var cols = getCols_(sheet);
+    var data = sheet.getDataRange().getValues();
+    var row = findRow_(data, cols, p.token);
+    if (row &lt; 0) return { success: true, status: 'notfound' };
+
+    var r = data[row];
+    var info = { name: nameOf_(r, cols), email: emailOf_(r, cols) };
+
+    if (String(r[cols.present] || '').trim() !== '') {
+      return { success: true, status: 'duplicate', name: info.name, email: info.email, ts: toMs_(r[cols.time]) };
+    }
+
+    var when = p.ts &amp;&amp; !isNaN(Number(p.ts)) ? new Date(Number(p.ts)) : new Date();
+    sheet.getRange(row + 1, cols.present + 1).setValue('Present');
+    sheet.getRange(row + 1, cols.time + 1).setValue(when).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    sheet.getRange(row + 1, cols.by + 1).setValue(String(p.device || ''));
+    SpreadsheetApp.flush();
+    return { success: true, status: 'ok', name: info.name, email: info.email, ts: when.getTime() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+</pre>
                 </div>
 
             </div>
@@ -379,6 +528,7 @@ function doPost(e) {
             updateSyncBadgeState();
             renderTable();
             updateStats();
+            startAutoSync();
         });
 
         // Toggle Camera Scanning
@@ -497,24 +647,6 @@ function doPost(e) {
         // Core Check-In Logic
         const pendingLookups = new Set();
 
-        // Ask the Google Apps Script web app for the attendee's name/email (needs the doGet lookup snippet)
-        async function liveLookup(url) {
-            const u = new URL(url);
-            u.searchParams.set('format', 'json');
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 8000);
-            try {
-                const res = await fetch(u.toString(), { redirect: 'follow', signal: ctrl.signal });
-                const data = await res.json();
-                if (data && data.success) return { name: data.name || '', email: data.email || '' };
-            } catch (err) {
-                console.error('Live lookup failed:', err);
-            } finally {
-                clearTimeout(timer);
-            }
-            return null;
-        }
-
         async function processCheckIn(rawData) {
             let parsed = parseAttendeeData(rawData);
             const lockKey = parsed.id;
@@ -528,61 +660,74 @@ function doPost(e) {
         }
 
         async function processCheckInInner(rawData, parsed) {
+            const token = parsed.id;
 
-            // Fill in name/email from the imported attendee list when the QR only holds an ID
-            let listMatch = null;
-            if (!parsed.name || !parsed.email) {
-                listMatch = lookupAttendee(parsed.id) || lookupAttendee(String(rawData).trim());
-                if (listMatch) {
-                    parsed.name = parsed.name || listMatch.name || null;
-                    parsed.email = parsed.email || listMatch.email || null;
-                }
-            }
-            
-            // Still no details and the QR is a URL: ask the Google Sheet script directly
-            let liveTried = false;
-            if (!parsed.name && !parsed.email && parsed.url &&
-                !checkedInAttendees.some(item => item.id === parsed.id)) {
-                liveTried = true;
-                const live = await liveLookup(parsed.url);
-                if (live) {
-                    listMatch = live;
-                    parsed.name = live.name || null;
-                    parsed.email = live.email || null;
-                }
-            }
+            // First QR scanned from a Google Script link? Use that script as the sync backend automatically.
+            if (!webhookUrl && parsed.url) autoSetWebhook(parsed.url);
 
-            // Check if already checked in locally
-            const existingIndex = checkedInAttendees.findIndex(item => item.id === parsed.id);
-
-            if (existingIndex !== -1) {
+            // Already recorded on this device
+            const existing = checkedInAttendees.find(item => item.id === token);
+            if (existing) {
                 playDuplicateSound();
-                showAlert('Already Checked In!', `${parsed.name || parsed.id} was already scanned.`, 'warning');
+                showAlert('Already Checked In!', `${escapeHtml(existing.name !== 'N/A' ? existing.name : existing.id)} was already checked in at ${existing.timestamp}.`, 'warning');
                 return;
             }
 
-            // Record Check-in
+            // Details from the sheet list / imported CSV
+            const match = lookupAttendee(token) || lookupAttendee(String(rawData).trim());
+            let name = parsed.name || (match && match.name) || '';
+            let email = parsed.email || (match && match.email) || '';
+            let ts = Date.now();
+            let synced = false;
+            let note = '';
+
+            if (webhookUrl) {
+                showAlert('Checking…', 'Contacting the sheet…', 'info');
+                const res = await apiCall({ action: 'checkin', token, device: deviceId, ts });
+
+                if (res && res.success && res.status === 'duplicate') {
+                    playDuplicateSound();
+                    const when = res.ts ? new Date(res.ts).toLocaleTimeString() : 'earlier';
+                    checkedInAttendees.push({
+                        id: token, name: res.name || name || 'N/A', email: res.email || email || 'N/A',
+                        ts: res.ts || 0, timestamp: when, synced: true
+                    });
+                    checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+                    saveLocalData(); renderTable(); updateStats();
+                    showAlert('Already Checked In!', `${escapeHtml(res.name || name || token)} was already checked in at ${when} (another device or earlier scan).`, 'warning');
+                    return;
+                }
+                if (res && res.success && res.status === 'notfound') {
+                    playDuplicateSound();
+                    showAlert('Not Found', `Token "${escapeHtml(token)}" is not in the attendee sheet. Not checked in.`, 'error');
+                    return;
+                }
+                if (res && res.success && res.status === 'ok') {
+                    name = res.name || name;
+                    email = res.email || email;
+                    synced = true;
+                } else {
+                    note = ' Saved on this device; it will sync to the sheet when the connection is back.';
+                }
+            }
+
             const newRecord = {
-                id: parsed.id,
-                name: parsed.name || 'N/A',
-                email: parsed.email || 'N/A',
-                timestamp: new Date().toLocaleTimeString(),
-                synced: false
+                id: token,
+                name: name || 'N/A',
+                email: email || 'N/A',
+                ts,
+                timestamp: new Date(ts).toLocaleTimeString(),
+                synced
             };
 
             checkedInAttendees.unshift(newRecord);
             saveLocalData();
             playSuccessSound();
 
-            if (!listMatch && newRecord.name === 'N/A' && (attendeeList.length || liveTried)) {
-                showAlert('Details Not Found', `Token "${newRecord.id}" was checked in, but no name/email was found (not in the imported list${liveTried ? ' and the sheet lookup returned nothing' : ''}).`, 'warning');
+            if (newRecord.name === 'N/A') {
+                showAlert('Checked In (no details)', `Token "${escapeHtml(token)}" is marked PRESENT, but no name/email was found.${note}`, 'warning');
             } else {
-                showAlert('Check-In Successful!', `${newRecord.name !== 'N/A' ? newRecord.name : newRecord.id} is marked PRESENT.`, 'success');
-            }
-
-            // Sync with Google Sheet
-            if (webhookUrl) {
-                syncRecordToGoogleSheet(newRecord);
+                showAlert(note ? 'Checked In (offline)' : 'Check-In Successful!', `${escapeHtml(newRecord.name)} is marked PRESENT.${note}`, note ? 'warning' : 'success');
             }
 
             renderTable();
@@ -630,23 +775,6 @@ function doPost(e) {
             }
         }
 
-        // Send to Google Apps Script Webhook
-        function syncRecordToGoogleSheet(record) {
-            fetch(webhookUrl, {
-                method: 'POST',
-                mode: 'no-cors', // Standard cross-origin POST for Google Apps Script Web Apps
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(record)
-            }).then(() => {
-                record.synced = true;
-                saveLocalData();
-                renderTable();
-                updateStats();
-            }).catch(err => {
-                console.error("Sync error:", err);
-            });
-        }
-
         // UI Alert Badge Banner
         function showAlert(title, message, type) {
             let bgClass, borderClass, textClass, iconName;
@@ -656,6 +784,11 @@ function doPost(e) {
                 borderClass = 'border-emerald-500/30';
                 textClass = 'text-emerald-400';
                 iconName = 'check-circle-2';
+            } else if (type === 'info') {
+                bgClass = 'bg-indigo-500/10';
+                borderClass = 'border-indigo-500/30';
+                textClass = 'text-indigo-300';
+                iconName = 'loader';
             } else if (type === 'warning') {
                 bgClass = 'bg-amber-500/10';
                 borderClass = 'border-amber-500/30';
@@ -733,26 +866,150 @@ function doPost(e) {
             statLastTime.textContent = checkedInAttendees.length > 0 ? checkedInAttendees[0].timestamp : '--:--';
         }
 
-        function updateSyncBadgeState() {
-            if (webhookUrl) {
-                syncStatusBadge.className = "flex items-center px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span> Google Sheet Live`;
-            } else {
-                syncStatusBadge.className = "flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
+        function updateSyncBadgeState(state) {
+            const base = "flex items-center px-3 py-1 rounded-full text-xs font-medium border cursor-pointer ";
+            if (!webhookUrl) {
+                syncStatusBadge.className = base + "bg-amber-500/10 text-amber-400 border-amber-500/20";
                 syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 mr-2"></span> Local Mode (Not Synced)`;
+            } else if (state === 'syncing') {
+                syncStatusBadge.className = base + "bg-indigo-500/10 text-indigo-300 border-indigo-500/20";
+                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-indigo-400 mr-2 animate-pulse"></span> Syncing…`;
+            } else if (state === 'error') {
+                syncStatusBadge.className = base + "bg-rose-500/10 text-rose-400 border-rose-500/20";
+                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-rose-400 mr-2"></span> Sheet unreachable (tap to retry)`;
+            } else {
+                syncStatusBadge.className = base + "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+                syncStatusBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span> Google Sheet Live`;
             }
         }
+
+        // ---- Multi-device sync through the Google Sheet ----
+        let syncTimer = null;
+        let syncing = false;
+        const deviceId = (() => {
+            let d = localStorage.getItem('event_device_id');
+            if (!d) { d = 'D' + Math.random().toString(36).slice(2, 6).toUpperCase(); localStorage.setItem('event_device_id', d); }
+            return d;
+        })();
+
+        function normalizeWebhook(url) {
+            try { const u = new URL(url.trim()); u.search = ''; u.hash = ''; return u.toString(); }
+            catch (e) { return url.trim(); }
+        }
+
+        function autoSetWebhook(scanUrl) {
+            try {
+                const u = new URL(scanUrl);
+                if (u.hostname === 'script.google.com' && /\/macros\//.test(u.pathname)) {
+                    webhookUrl = normalizeWebhook(scanUrl);
+                    localStorage.setItem('event_webhook_url', webhookUrl);
+                    webhookUrlInput.value = webhookUrl;
+                    updateSyncBadgeState();
+                    startAutoSync();
+                }
+            } catch (e) {}
+        }
+
+        async function apiCall(params, timeoutMs = 12000) {
+            if (!webhookUrl) return null;
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+            try {
+                const u = new URL(webhookUrl);
+                Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
+                u.searchParams.set('_', Date.now());
+                const res = await fetch(u.toString(), { redirect: 'follow', signal: ctrl.signal });
+                return await res.json();
+            } catch (err) {
+                console.error('Sheet API error:', err);
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        // Push check-ins that were saved offline
+        async function flushUnsynced() {
+            const pending = checkedInAttendees.filter(r => !r.synced && !r.syncError);
+            for (const rec of pending) {
+                const res = await apiCall({ action: 'checkin', token: rec.id, device: deviceId, ts: rec.ts || '' });
+                if (!res) break; // still offline
+                if (res.success && (res.status === 'ok' || res.status === 'duplicate')) {
+                    rec.synced = true;
+                    if (res.name && rec.name === 'N/A') rec.name = res.name;
+                    if (res.email && rec.email === 'N/A') rec.email = res.email;
+                } else if (res.success && res.status === 'notfound') {
+                    rec.syncError = 'notfound';
+                }
+            }
+            saveLocalData();
+        }
+
+        // Pull the full attendee list + everyone checked in on ANY device
+        async function syncFromSheet() {
+            if (!webhookUrl || syncing) return;
+            syncing = true;
+            updateSyncBadgeState('syncing');
+            try {
+                await flushUnsynced();
+                const reqStart = Date.now();
+                const data = await apiCall({ action: 'list' }, 25000);
+                if (!data || !data.success) { updateSyncBadgeState('error'); return; }
+
+                attendeeList = data.attendees.map(a => ({ id: a.token, name: a.name || '', email: a.email || '' }));
+                try { localStorage.setItem('event_attendee_list', JSON.stringify(attendeeList)); } catch (e) {}
+
+                const remote = new Map(data.attendees.filter(a => a.checkedIn).map(a => [a.token, a]));
+                remote.forEach((a, token) => {
+                    const local = checkedInAttendees.find(r => r.id === token);
+                    if (local) {
+                        local.synced = true;
+                        if (local.name === 'N/A' && a.name) local.name = a.name;
+                        if (local.email === 'N/A' && a.email) local.email = a.email;
+                    } else {
+                        checkedInAttendees.push({
+                            id: token, name: a.name || 'N/A', email: a.email || 'N/A',
+                            ts: a.ts || 0, timestamp: a.ts ? new Date(a.ts).toLocaleTimeString() : '--', synced: true
+                        });
+                    }
+                });
+                // Someone cleared a check-in in the sheet: drop it here too
+                checkedInAttendees = checkedInAttendees.filter(r =>
+                    !(r.synced && r.ts && !remote.has(r.id) && r.ts < reqStart - 15000));
+                checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+                saveLocalData();
+                renderTable(searchInput.value);
+                updateStats();
+                updateAttendeeListStatus(remote.size);
+                updateSyncBadgeState('ok');
+            } finally {
+                syncing = false;
+            }
+        }
+
+        function startAutoSync() {
+            if (syncTimer) clearInterval(syncTimer);
+            if (!webhookUrl) return;
+            syncFromSheet();
+            syncTimer = setInterval(() => { if (!document.hidden) syncFromSheet(); }, 30000);
+        }
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) syncFromSheet(); });
+        window.addEventListener('online', () => syncFromSheet());
+        syncStatusBadge.addEventListener('click', () => { if (webhookUrl) syncFromSheet(); });
 
         // Modal Controls & Integration Logic
         openSetupBtn.addEventListener('click', () => setupModal.classList.remove('hidden'));
         closeSetupBtn.addEventListener('click', () => setupModal.classList.add('hidden'));
 
         saveWebhookBtn.addEventListener('click', () => {
-            webhookUrl = webhookUrlInput.value.trim();
+            webhookUrl = normalizeWebhook(webhookUrlInput.value);
+            webhookUrlInput.value = webhookUrl;
             localStorage.setItem('event_webhook_url', webhookUrl);
             updateSyncBadgeState();
             updateStats();
             setupModal.classList.add('hidden');
+            startAutoSync();
         });
 
         copyScriptBtn.addEventListener('click', () => {
@@ -791,7 +1048,21 @@ function doPost(e) {
         });
 
         // ---- Attendee list import / lookup ----
-        function parseCSV(text) {
+        function detectDelimiter(text) {
+            const firstLine = text.split(/\r\n|\n|\r/).find(l => l.trim() !== '') || '';
+            let best = ',', bestCount = 0;
+            for (const d of [',', ';', '\t']) {
+                let count = 0, inQ = false;
+                for (const ch of firstLine) {
+                    if (ch === '"') inQ = !inQ;
+                    else if (ch === d && !inQ) count++;
+                }
+                if (count > bestCount) { best = d; bestCount = count; }
+            }
+            return best;
+        }
+
+        function parseCSV(text, delim = ',') {
             const rows = []; let row = [], field = '', inQuotes = false;
             text = text.replace(/^\uFEFF/, '');
             for (let i = 0; i < text.length; i++) {
@@ -800,8 +1071,9 @@ function doPost(e) {
                     if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
                     else if (c === '"') inQuotes = false;
                     else field += c;
-                } else if (c === '"') inQuotes = true;
-                else if (c === ',') { row.push(field); field = ''; }
+                } else if (c === '"' && field === '') {
+                    inQuotes = true;           // quotes only open at the start of a field
+                } else if (c === delim) { row.push(field); field = ''; }
                 else if (c === '\n' || c === '\r') {
                     if (c === '\r' && text[i + 1] === '\n') i++;
                     row.push(field); field = '';
@@ -814,12 +1086,14 @@ function doPost(e) {
             return rows;
         }
 
+        // Returns { count, total } (rows loaded / rows found)
         function importAttendeeCSV(text) {
-            const rows = parseCSV(text);
-            if (rows.length < 2) return 0;
+            const rows = parseCSV(text, detectDelimiter(text));
+            if (rows.length < 2) return { count: 0, total: 0 };
             const header = rows[0].map(h => h.trim().toLowerCase());
             const find = re => header.findIndex(h => re.test(h));
-            let idCol = find(/^(id|ticket.?id|ticket|code|token|qr.*|attendee.?id|reg.*id|registration.*)$|\bid\b|token/);
+            let idCol = find(/token/);
+            if (idCol === -1) idCol = find(/^(id|ticket.?id|ticket|code|qr.*|attendee.?id|reg.*id|registration.*)$|\bid\b/);
             let nameCol = find(/name/);
             let emailCol = find(/e-?mail|mail/);
             if (idCol === -1) idCol = 0;
@@ -828,18 +1102,19 @@ function doPost(e) {
             const list = [];
             for (let i = 1; i < rows.length; i++) {
                 const r = rows[i];
-                const id = (r[idCol] || '').trim();
+                const email = emailCol >= 0 ? (r[emailCol] || '').trim() : '';
+                const id = (r[idCol] || '').trim() || email || (r.find(c => c.trim()) || '').trim();
                 if (!id) continue;
                 list.push({
                     id,
                     name: (r[nameCol] || '').trim(),
-                    email: emailCol >= 0 ? (r[emailCol] || '').trim() : '',
+                    email,
                     keys: r.map(c => c.trim().toLowerCase()).filter(Boolean)
                 });
             }
             attendeeList = list;
             localStorage.setItem('event_attendee_list', JSON.stringify(list));
-            return list.length;
+            return { count: list.length, total: rows.length - 1 };
         }
 
         function lookupAttendee(value) {
@@ -848,23 +1123,30 @@ function doPost(e) {
             return attendeeList.find(a => a.id.toLowerCase() === v || (a.email && a.email.toLowerCase() === v) || (a.keys && a.keys.includes(v))) || null;
         }
 
-        function updateAttendeeListStatus() {
-            document.getElementById('attendeeListStatus').textContent =
-                attendeeList.length ? `${attendeeList.length} attendees loaded` : 'No list imported';
+        function updateAttendeeListStatus(checkedCount) {
+            const el = document.getElementById('attendeeListStatus');
+            if (!attendeeList.length) { el.textContent = 'No list loaded'; return; }
+            el.textContent = `${attendeeList.length} attendees loaded` +
+                (webhookUrl && typeof checkedCount === 'number' ? ` · ${checkedCount} checked in (all devices)` : '');
         }
 
         document.getElementById('importListBtn').addEventListener('click', () => document.getElementById('attendeeCsvInput').click());
-        document.getElementById('attendeeCsvInput').addEventListener('change', (e) => {
+        document.getElementById('attendeeCsvInput').addEventListener('change', async (e) => {
             const file = e.target.files && e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = () => {
-                const n = importAttendeeCSV(String(reader.result));
+            try {
+                const buf = new Uint8Array(await file.arrayBuffer());
+                let encoding = 'utf-8';
+                if (buf[0] === 0xFF && buf[1] === 0xFE) encoding = 'utf-16le';
+                else if (buf[0] === 0xFE && buf[1] === 0xFF) encoding = 'utf-16be';
+                const text = new TextDecoder(encoding).decode(buf);
+                const { count, total } = importAttendeeCSV(text);
                 updateAttendeeListStatus();
-                if (n) showAlert('List Imported', `${n} attendees loaded. Scans will now show name and email.`, 'success');
-                else showAlert('Import Failed', 'Could not read any attendees. Make sure the file is a CSV with a header row.', 'error');
-            };
-            reader.readAsText(file);
+                if (count) showAlert('List Imported', `${count} of ${total} rows loaded. Scans will now show name and email.`, count === total ? 'success' : 'warning');
+                else showAlert('Import Failed', 'Could not read any attendees. Make sure the file is a CSV (not .xlsx) with a header row.', 'error');
+            } catch (err) {
+                showAlert('Import Failed', 'Could not read that file.', 'error');
+            }
             e.target.value = '';
         });
         document.getElementById('clearListBtn').addEventListener('click', () => {
