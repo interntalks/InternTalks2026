@@ -391,20 +391,26 @@ function apiList_() {
   var sheet = getSheet_();
   var cols = getCols_(sheet);
   var data = sheet.getDataRange().getValues();
-  var out = [];
+  var out = [], seen = {}, presentRows = 0, blankTokenPresent = 0, duplicateTokens = 0;
   for (var i = 1; i &lt; data.length; i++) {
     var r = data[i];
     var tok = String(r[cols.token] || '').trim();
-    if (!tok) continue;
+    var isPresent = String(r[cols.present] || '').trim() !== '';
+    if (!tok) { if (isPresent) blankTokenPresent++; continue; }
+    var k = tok.toLowerCase();
+    if (seen[k]) duplicateTokens++;
+    seen[k] = true;
+    if (isPresent) presentRows++;
     out.push({
       token: tok,
       name: nameOf_(r, cols),
       email: emailOf_(r, cols),
-      checkedIn: String(r[cols.present] || '').trim() !== '',
+      checkedIn: isPresent,
       ts: toMs_(r[cols.time])
     });
   }
-  return { success: true, attendees: out, total: out.length };
+  return { success: true, attendees: out, total: out.length,
+           presentRows: presentRows, blankTokenPresent: blankTokenPresent, duplicateTokens: duplicateTokens };
 }
 
 function apiLookup_(p) {
@@ -436,7 +442,7 @@ function apiCheckin_(p) {
     var info = { name: nameOf_(r, cols), email: emailOf_(r, cols) };
 
     if (String(r[cols.present] || '').trim() !== '') {
-      return { success: true, status: 'duplicate', name: info.name, email: info.email, ts: toMs_(r[cols.time]) };
+      return { success: true, status: 'duplicate', token: String(r[cols.token]).trim(), name: info.name, email: info.email, ts: toMs_(r[cols.time]) };
     }
 
     var when = p.ts &amp;&amp; !isNaN(Number(p.ts)) ? new Date(Number(p.ts)) : new Date();
@@ -444,7 +450,7 @@ function apiCheckin_(p) {
     sheet.getRange(row + 1, cols.time + 1).setValue(when).setNumberFormat('yyyy-mm-dd hh:mm:ss');
     sheet.getRange(row + 1, cols.by + 1).setValue(String(p.device || ''));
     SpreadsheetApp.flush();
-    return { success: true, status: 'ok', name: info.name, email: info.email, ts: when.getTime() };
+    return { success: true, status: 'ok', token: String(r[cols.token]).trim(), name: info.name, email: info.email, ts: when.getTime() };
   } finally {
     lock.releaseLock();
   }
@@ -466,7 +472,7 @@ function adoptUnknown_(sheet, cols, p) {
   sheet.appendRow(row);
   sheet.getRange(sheet.getLastRow(), cols.time + 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
   SpreadsheetApp.flush();
-  return { success: true, status: 'adopted', name: name, email: email, ts: when.getTime() };
+  return { success: true, status: 'adopted', token: String(p.token).trim(), name: name, email: email, ts: when.getTime() };
 }
 </pre>
                 </div>
@@ -554,6 +560,8 @@ function adoptUnknown_(sheet, cols, p) {
             updateSyncBadgeState();
             renderTable();
             updateStats();
+            dedupeRecords();
+            saveLocalData();
             startAutoSync();
         });
 
@@ -692,7 +700,7 @@ function adoptUnknown_(sheet, cols, p) {
             if (!webhookUrl && parsed.url) autoSetWebhook(parsed.url);
 
             // Already recorded on this device
-            const existing = checkedInAttendees.find(item => item.id === token);
+            const existing = checkedInAttendees.find(item => idKey(item.id) === idKey(token));
             if (existing) {
                 playDuplicateSound();
                 showAlert('Already Checked In!', `${escapeHtml(existing.name !== 'N/A' ? existing.name : existing.id)} was already checked in at ${existing.timestamp}.`, 'warning');
@@ -707,15 +715,20 @@ function adoptUnknown_(sheet, cols, p) {
             let synced = false;
             let note = '';
 
+            let res = null;
             if (webhookUrl) {
                 showAlert('Checking…', 'Contacting the sheet…', 'info');
-                const res = await apiCall({ action: 'checkin', token, device: deviceId, ts });
+                res = await apiCall({ action: 'checkin', token, device: deviceId, ts });
 
                 if (res && res.success && res.status === 'duplicate') {
                     playDuplicateSound();
                     const when = res.ts ? new Date(res.ts).toLocaleTimeString() : 'earlier';
-                    checkedInAttendees.push({
-                        id: token, name: res.name || name || 'N/A', email: res.email || email || 'N/A',
+                    const canon = res.token || token;
+                    const have = checkedInAttendees.find(i => idKey(i.id) === idKey(canon));
+                    if (lastRemoteKeys != null) lastRemoteKeys.add(idKey(canon));
+                    if (have) { have.synced = true; have.confirmed = true; }
+                    else checkedInAttendees.push({
+                        id: canon, name: res.name || name || 'N/A', email: res.email || email || 'N/A',
                         ts: res.ts || 0, timestamp: when, synced: true, confirmed: true
                     });
                     checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
@@ -739,8 +752,24 @@ function adoptUnknown_(sheet, cols, p) {
                 }
             }
 
+            // A background sync may have added this person while we waited for the sheet: update, don't duplicate
+            const canonId = (res && res.token) ? res.token : token;
+            if (synced && lastRemoteKeys != null) lastRemoteKeys.add(idKey(canonId));
+            const raced = checkedInAttendees.find(i => idKey(i.id) === idKey(canonId));
+            if (raced) {
+                raced.synced = raced.synced || synced;
+                raced.confirmed = raced.confirmed || synced;
+                if (raced.name === 'N/A' && name) raced.name = name;
+                if (raced.email === 'N/A' && email) raced.email = email;
+                saveLocalData();
+                playSuccessSound();
+                showAlert('Check-In Successful!', `${escapeHtml(raced.name !== 'N/A' ? raced.name : raced.id)} is marked PRESENT.${note}`, note ? 'warning' : 'success');
+                renderTable(); updateStats();
+                return;
+            }
+
             const newRecord = {
-                id: token,
+                id: canonId,
                 name: name || 'N/A',
                 email: email || 'N/A',
                 ts,
@@ -867,7 +896,7 @@ function adoptUnknown_(sheet, cols, p) {
                     </td>
                     <td class="px-4 py-3 text-slate-400 text-[11px]">${item.timestamp}</td>
                     <td class="px-4 py-3 text-center">
-                        ${item.synced 
+                        ${!notInSheet(item) 
                             ? `<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i data-lucide="check" class="w-3 h-3 mr-1"></i> Synced</span>`
                             : `<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-slate-700 text-slate-400">Local</span>`
                         }
@@ -891,7 +920,7 @@ function adoptUnknown_(sheet, cols, p) {
         function updateStats() {
             statTotalCheckedIn.textContent = checkedInAttendees.length;
             if (typeof updateDiag === 'function') updateDiag();
-            const unsyncedCount = checkedInAttendees.filter(a => !a.synced).length;
+            const unsyncedCount = checkedInAttendees.filter(notInSheet).length;
             statPendingSync.textContent = webhookUrl ? unsyncedCount : '--';
             statLastTime.textContent = checkedInAttendees.length > 0 ? checkedInAttendees[0].timestamp : '--:--';
         }
@@ -914,19 +943,57 @@ function adoptUnknown_(sheet, cols, p) {
         }
 
         // ---- Sync diagnostics (visible line in the Attendee List card) ----
-        const APP_VERSION = 'v6 (23 Oct)';
+        const APP_VERSION = 'v8 (23 Oct)';
         let scriptOutdated = false;
         let lastRemoteCount = null;
+        var lastRemoteKeys = null;   // keys the sheet reported as present at the last successful sync
+        var lastSheetInfo = null;    // raw sheet-side counts (needs the updated Code.gs)
+        // A record only counts as uploaded if the SHEET really has it (not just a local flag)
+        function notInSheet(r) {
+            return !r.synced || (lastRemoteKeys != null && !lastRemoteKeys.has(idKey(r.id)));
+        }
         let lastSyncTime = '';
 
         function updateDiag() {
             const el = document.getElementById('syncDiag');
             if (!el) return;
-            const waiting = checkedInAttendees.filter(r => !r.synced).length;
+            const waiting = checkedInAttendees.filter(notInSheet).length;
             let t = `${APP_VERSION} | this device: ${checkedInAttendees.length} | sheet: ${lastRemoteCount === null ? '?' : lastRemoteCount} | waiting to upload: ${waiting}`;
+            if (lastSheetInfo && typeof lastSheetInfo.presentRows === 'number') {
+                const bits = [];
+                if (lastSheetInfo.presentRows !== lastRemoteCount) bits.push(`${lastSheetInfo.presentRows} rows marked Present`);
+                if (lastSheetInfo.duplicateTokens) bits.push(`${lastSheetInfo.duplicateTokens} repeated token row(s)`);
+                if (lastSheetInfo.blankTokenPresent) bits.push(`${lastSheetInfo.blankTokenPresent} Present row(s) with no token`);
+                if (bits.length) t += ` | SHEET ISSUE: ${bits.join(', ')}`;
+            }
             if (lastSyncTime) t += ` | last sync ${lastSyncTime}`;
+            if (lastExtras.length) t += ` | only on this device: ${lastExtras.slice(0, 3).join(', ')}`;
             if (scriptOutdated) t += ' | WARNING: the sheet script is OLD. Redeploy Code.gs (Deploy > Manage deployments > pencil > New version > Deploy).';
             el.textContent = t;
+        }
+
+        const idKey = v => String(v == null ? '' : v).trim().toLowerCase();
+        let lastExtras = [];
+
+        // One record per person: merge duplicates (e.g. a scan and a sync landing at the same moment)
+        function dedupeRecords() {
+            const map = new Map();
+            let removed = 0;
+            checkedInAttendees.forEach(r => {
+                const k = idKey(r.id);
+                const cur = map.get(k);
+                if (!cur) { map.set(k, r); return; }
+                removed++;
+                const keep = Object.assign({}, cur);
+                if (keep.name === 'N/A' && r.name && r.name !== 'N/A') keep.name = r.name;
+                if (keep.email === 'N/A' && r.email && r.email !== 'N/A') keep.email = r.email;
+                keep.synced = !!(cur.synced || r.synced);
+                keep.confirmed = !!(cur.confirmed || r.confirmed);
+                if (r.ts && (!keep.ts || r.ts < keep.ts)) { keep.ts = r.ts; keep.timestamp = r.timestamp; }
+                map.set(k, keep);
+            });
+            checkedInAttendees = Array.from(map.values());
+            return removed;
         }
 
         // ---- Multi-device sync through the Google Sheet ----
@@ -1014,6 +1081,8 @@ function adoptUnknown_(sheet, cols, p) {
                 if (res.success && ['ok', 'duplicate', 'adopted'].includes(res.status)) {
                     rec.synced = true;
                     rec.confirmed = true;
+                    if (res.token) rec.id = res.token;   // use the sheet's own spelling of the token
+                    if (lastRemoteKeys != null) lastRemoteKeys.add(idKey(rec.id));
                     if (res.name && rec.name === 'N/A') rec.name = res.name;
                     if (res.email && rec.email === 'N/A') rec.email = res.email;
                 } else if (res.success && res.status === 'notfound') {
@@ -1044,10 +1113,12 @@ function adoptUnknown_(sheet, cols, p) {
                 attendeeList = data.attendees.map(a => ({ id: a.token, name: a.name || '', email: a.email || '' }));
                 try { localStorage.setItem('event_attendee_list', JSON.stringify(attendeeList)); } catch (e) {}
 
-                const remote = new Map(data.attendees.filter(a => a.checkedIn).map(a => [a.token, a]));
-                remote.forEach((a, token) => {
-                    const local = checkedInAttendees.find(r => r.id === token);
+                const remote = new Map(data.attendees.filter(a => a.checkedIn).map(a => [idKey(a.token), a]));
+                remote.forEach((a) => {
+                    const token = a.token;
+                    const local = checkedInAttendees.find(r => idKey(r.id) === idKey(token));
                     if (local) {
+                        local.id = token;
                         local.synced = true;
                         local.confirmed = true;
                         if (local.name === 'N/A' && a.name) local.name = a.name;
@@ -1062,28 +1133,41 @@ function adoptUnknown_(sheet, cols, p) {
                 // Keep every scan. Records the sheet already confirmed but that were later cleared
                 // in the sheet on purpose are dropped; OLD scans the sheet never received
                 // (made before linking, or lost) are kept and uploaded so every device counts them.
+                const remoteKeys = new Set(remote.keys());
+                const dups = dedupeRecords();
                 checkedInAttendees = checkedInAttendees.filter(r => {
-                    if (remote.has(r.id)) return true;
-                    if (r.confirmed) return !(r.ts && r.ts < reqStart - 15000);
+                    if (remoteKeys.has(idKey(r.id))) return true;
+                    if (r.confirmed) return r.ts ? r.ts >= reqStart - 15000 : false;
                     return true;
                 });
-                const toUpload = checkedInAttendees.filter(r => !remote.has(r.id) && !r.confirmed);
+                let verifyAgain = false;
+                const toUpload = checkedInAttendees.filter(r => !remoteKeys.has(idKey(r.id)) && !r.confirmed);
                 toUpload.forEach(r => { r.synced = false; delete r.syncError; });
                 if (toUpload.length) {
                     await flushUnsynced();
                     const done = toUpload.filter(r => r.synced).length;
+                    if (done) verifyAgain = true;
                     if (done) showAlert('Old Scans Added', `${done} earlier check-in(s) were uploaded to the sheet, so every device now counts them.`, 'success');
                 }
+                if (dups) showAlert('Cleaned Up', `${dups} duplicate record(s) on this device were merged.`, 'info');
+                lastExtras = checkedInAttendees
+                    .filter(r => !remoteKeys.has(idKey(r.id)) && !(r.synced && r.confirmed))
+                    .map(r => r.id);
                 checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
                 saveLocalData();
                 renderTable(searchInput.value);
                 updateStats();
                 lastRemoteCount = remote.size;
+                lastRemoteKeys = new Set(remoteKeys);
+                checkedInAttendees.forEach(r => { if (!remoteKeys.has(idKey(r.id)) && r.synced && r.confirmed) { /* recent scan, sheet confirmed it */ lastRemoteKeys.add(idKey(r.id)); } });
+                lastSheetInfo = { presentRows: data.presentRows, duplicateTokens: data.duplicateTokens, blankTokenPresent: data.blankTokenPresent };
+                if (verifyAgain) setTimeout(syncFromSheet, 1500); // re-read the sheet so its count includes what we just uploaded
                 lastSyncTime = new Date().toLocaleTimeString();
                 updateAttendeeListStatus(remote.size);
                 updateSyncBadgeState('ok');
-                updateDiag();
+                renderTable(searchInput.value);
+                updateStats();   // also refreshes the diagnostics line
             } finally {
                 syncing = false;
             }
