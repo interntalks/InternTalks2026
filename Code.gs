@@ -6,6 +6,7 @@
  *                       devices load the same list straight from the sheet
  *  - action=checkin  -> marks one attendee "Present" (with time + device) and tells the
  *                       app if that person was ALREADY checked in on another device
+ *                       (adopt=1: also adds unknown tokens as new rows, used to upload old scans)
  *
  * Columns are found by header name in row 1 (any order):
  *   token : header containing "token", "qr", "ticket", "code" or exactly "id"
@@ -164,7 +165,12 @@ function apiCheckin_(p) {
     var cols = getCols_(sheet);
     var data = sheet.getDataRange().getValues();
     var row = findRow_(data, cols, p.token);
-    if (row < 0) return { success: true, status: 'notfound' };
+    if (row < 0) {
+      // adopt=1 is sent only when the app uploads OLD scans made before the sheet was linked:
+      // unknown tokens are added as new rows so every device can count them.
+      if (String(p.adopt) === '1' && String(p.token || '').trim()) return adoptUnknown_(sheet, cols, p);
+      return { success: true, status: 'notfound' };
+    }
 
     var r = data[row];
     var info = { name: nameOf_(r, cols), email: emailOf_(r, cols) };
@@ -182,4 +188,23 @@ function apiCheckin_(p) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function adoptUnknown_(sheet, cols, p) {
+  var width = Math.max(sheet.getLastColumn(), cols.present + 1, cols.time + 1, cols.by + 1);
+  var row = [];
+  for (var i = 0; i < width; i++) row.push('');
+  var when = p.ts && !isNaN(Number(p.ts)) ? new Date(Number(p.ts)) : new Date();
+  var name = String(p.name || '').trim();
+  var email = String(p.email || '').trim();
+  row[cols.token] = String(p.token).trim();
+  if (cols.nameCols.length && name) row[cols.nameCols[0]] = name;
+  if (cols.email >= 0 && email) row[cols.email] = email;
+  row[cols.present] = 'Present';
+  row[cols.time] = when;
+  row[cols.by] = String(p.device || '') + ' (added from device)';
+  sheet.appendRow(row);
+  sheet.getRange(sheet.getLastRow(), cols.time + 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  SpreadsheetApp.flush();
+  return { success: true, status: 'adopted', name: name, email: email, ts: when.getTime() };
 }

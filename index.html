@@ -265,6 +265,7 @@
  *                       devices load the same list straight from the sheet
  *  - action=checkin  -&gt; marks one attendee "Present" (with time + device) and tells the
  *                       app if that person was ALREADY checked in on another device
+ *                       (adopt=1: also adds unknown tokens as new rows, used to upload old scans)
  *
  * Columns are found by header name in row 1 (any order):
  *   token : header containing "token", "qr", "ticket", "code" or exactly "id"
@@ -423,7 +424,12 @@ function apiCheckin_(p) {
     var cols = getCols_(sheet);
     var data = sheet.getDataRange().getValues();
     var row = findRow_(data, cols, p.token);
-    if (row &lt; 0) return { success: true, status: 'notfound' };
+    if (row &lt; 0) {
+      // adopt=1 is sent only when the app uploads OLD scans made before the sheet was linked:
+      // unknown tokens are added as new rows so every device can count them.
+      if (String(p.adopt) === '1' &amp;&amp; String(p.token || '').trim()) return adoptUnknown_(sheet, cols, p);
+      return { success: true, status: 'notfound' };
+    }
 
     var r = data[row];
     var info = { name: nameOf_(r, cols), email: emailOf_(r, cols) };
@@ -441,6 +447,25 @@ function apiCheckin_(p) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function adoptUnknown_(sheet, cols, p) {
+  var width = Math.max(sheet.getLastColumn(), cols.present + 1, cols.time + 1, cols.by + 1);
+  var row = [];
+  for (var i = 0; i &lt; width; i++) row.push('');
+  var when = p.ts &amp;&amp; !isNaN(Number(p.ts)) ? new Date(Number(p.ts)) : new Date();
+  var name = String(p.name || '').trim();
+  var email = String(p.email || '').trim();
+  row[cols.token] = String(p.token).trim();
+  if (cols.nameCols.length &amp;&amp; name) row[cols.nameCols[0]] = name;
+  if (cols.email &gt;= 0 &amp;&amp; email) row[cols.email] = email;
+  row[cols.present] = 'Present';
+  row[cols.time] = when;
+  row[cols.by] = String(p.device || '') + ' (added from device)';
+  sheet.appendRow(row);
+  sheet.getRange(sheet.getLastRow(), cols.time + 1).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  SpreadsheetApp.flush();
+  return { success: true, status: 'adopted', name: name, email: email, ts: when.getTime() };
 }
 </pre>
                 </div>
@@ -690,7 +715,7 @@ function apiCheckin_(p) {
                     const when = res.ts ? new Date(res.ts).toLocaleTimeString() : 'earlier';
                     checkedInAttendees.push({
                         id: token, name: res.name || name || 'N/A', email: res.email || email || 'N/A',
-                        ts: res.ts || 0, timestamp: when, synced: true
+                        ts: res.ts || 0, timestamp: when, synced: true, confirmed: true
                     });
                     checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
                     saveLocalData(); renderTable(); updateStats();
@@ -707,7 +732,9 @@ function apiCheckin_(p) {
                     email = res.email || email;
                     synced = true;
                 } else {
-                    note = ' Saved on this device; it will sync to the sheet when the connection is back.';
+                    note = lastApiError === 'notjson' || lastApiError.startsWith('server:')
+                        ? ' Saved on this device only: the sheet script is not set up correctly (tap the status badge for details).'
+                        : ' Saved on this device; it will sync to the sheet when the connection is back.';
                 }
             }
 
@@ -717,7 +744,8 @@ function apiCheckin_(p) {
                 email: email || 'N/A',
                 ts,
                 timestamp: new Date(ts).toLocaleTimeString(),
-                synced
+                synced,
+                confirmed: synced
             };
 
             checkedInAttendees.unshift(newRecord);
@@ -910,8 +938,11 @@ function apiCheckin_(p) {
             } catch (e) {}
         }
 
+        let lastApiError = '';
+
         async function apiCall(params, timeoutMs = 12000) {
             if (!webhookUrl) return null;
+            lastApiError = '';
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), timeoutMs);
             try {
@@ -919,8 +950,14 @@ function apiCheckin_(p) {
                 Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
                 u.searchParams.set('_', Date.now());
                 const res = await fetch(u.toString(), { redirect: 'follow', signal: ctrl.signal });
-                return await res.json();
+                const text = await res.text();
+                let data;
+                try { data = JSON.parse(text); }
+                catch (e) { lastApiError = 'notjson'; console.error('Not JSON:', text.slice(0, 200)); return null; }
+                if (data && data.success === false && data.error) lastApiError = 'server: ' + data.error;
+                return data;
             } catch (err) {
+                lastApiError = err && err.name === 'AbortError' ? 'timeout' : 'network';
                 console.error('Sheet API error:', err);
                 return null;
             } finally {
@@ -928,18 +965,40 @@ function apiCheckin_(p) {
             }
         }
 
+        function diagnoseSyncError() {
+            if (!/\/exec$/.test(webhookUrl)) {
+                return 'The Web App URL should end with <b>/exec</b>. Copy it again from Deploy > Manage deployments (not the "test" /dev link).';
+            }
+            if (lastApiError === 'notjson') {
+                return 'The URL answered, but not with data. The new <b>Code.gs</b> is probably not deployed yet: Deploy > Manage deployments > pencil > Version: <b>New version</b> > Deploy. Also check that your existing <b>doGet</b> has the 3-line hook from the top of Code.gs.';
+            }
+            if (lastApiError.startsWith('server:')) {
+                const msg = escapeHtml(lastApiError.slice(7));
+                return `The script returned an error: <b>${msg}</b>. If it mentions null or getSheets, open Apps Script from the sheet itself (Extensions > Apps Script) so it is attached to the sheet.`;
+            }
+            if (lastApiError === 'timeout') {
+                return 'The sheet took too long to answer. Check the internet connection and tap the badge to retry.';
+            }
+            return 'Could not reach the script. Check: access is set to <b>Anyone</b> (not "Anyone with Google account"), the deployment is Execute as <b>Me</b>, the URL is correct, and the phone has internet.';
+        }
+
         // Push check-ins that were saved offline
         async function flushUnsynced() {
             const pending = checkedInAttendees.filter(r => !r.synced && !r.syncError);
             for (const rec of pending) {
-                const res = await apiCall({ action: 'checkin', token: rec.id, device: deviceId, ts: rec.ts || '' });
+                if (/^https?:\/\//i.test(rec.id)) rec.id = extractToken(rec.id);
+                const res = await apiCall({
+                    action: 'checkin', token: rec.id, device: deviceId, ts: rec.ts || '', adopt: '1',
+                    name: rec.name !== 'N/A' ? rec.name : '', email: rec.email !== 'N/A' ? rec.email : ''
+                });
                 if (!res) break; // still offline
-                if (res.success && (res.status === 'ok' || res.status === 'duplicate')) {
+                if (res.success && ['ok', 'duplicate', 'adopted'].includes(res.status)) {
                     rec.synced = true;
+                    rec.confirmed = true;
                     if (res.name && rec.name === 'N/A') rec.name = res.name;
                     if (res.email && rec.email === 'N/A') rec.email = res.email;
-                } else if (res.success && res.status === 'notfound') {
-                    rec.syncError = 'notfound';
+                } else if (res.success === false) {
+                    rec.syncError = 'server'; // e.g. old Code.gs without adopt support
                 }
             }
             saveLocalData();
@@ -954,7 +1013,11 @@ function apiCheckin_(p) {
                 await flushUnsynced();
                 const reqStart = Date.now();
                 const data = await apiCall({ action: 'list' }, 25000);
-                if (!data || !data.success) { updateSyncBadgeState('error'); return; }
+                if (!data || !data.success) {
+                    updateSyncBadgeState('error');
+                    showAlert('Sheet Not Synced', diagnoseSyncError(), 'error');
+                    return;
+                }
 
                 attendeeList = data.attendees.map(a => ({ id: a.token, name: a.name || '', email: a.email || '' }));
                 try { localStorage.setItem('event_attendee_list', JSON.stringify(attendeeList)); } catch (e) {}
@@ -964,18 +1027,31 @@ function apiCheckin_(p) {
                     const local = checkedInAttendees.find(r => r.id === token);
                     if (local) {
                         local.synced = true;
+                        local.confirmed = true;
                         if (local.name === 'N/A' && a.name) local.name = a.name;
                         if (local.email === 'N/A' && a.email) local.email = a.email;
                     } else {
                         checkedInAttendees.push({
                             id: token, name: a.name || 'N/A', email: a.email || 'N/A',
-                            ts: a.ts || 0, timestamp: a.ts ? new Date(a.ts).toLocaleTimeString() : '--', synced: true
+                            ts: a.ts || 0, timestamp: a.ts ? new Date(a.ts).toLocaleTimeString() : '--', synced: true, confirmed: true
                         });
                     }
                 });
-                // Someone cleared a check-in in the sheet: drop it here too
-                checkedInAttendees = checkedInAttendees.filter(r =>
-                    !(r.synced && r.ts && !remote.has(r.id) && r.ts < reqStart - 15000));
+                // Keep every scan. Records the sheet already confirmed but that were later cleared
+                // in the sheet on purpose are dropped; OLD scans the sheet never received
+                // (made before linking, or lost) are kept and uploaded so every device counts them.
+                checkedInAttendees = checkedInAttendees.filter(r => {
+                    if (remote.has(r.id)) return true;
+                    if (r.confirmed) return !(r.ts && r.ts < reqStart - 15000);
+                    return true;
+                });
+                const toUpload = checkedInAttendees.filter(r => !remote.has(r.id) && !r.confirmed);
+                toUpload.forEach(r => { r.synced = false; delete r.syncError; });
+                if (toUpload.length) {
+                    await flushUnsynced();
+                    const done = toUpload.filter(r => r.synced).length;
+                    if (done) showAlert('Old Scans Added', `${done} earlier check-in(s) were uploaded to the sheet, so every device now counts them.`, 'success');
+                }
                 checkedInAttendees.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
                 saveLocalData();
